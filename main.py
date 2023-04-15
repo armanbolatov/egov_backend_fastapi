@@ -17,6 +17,7 @@ engine = create_engine(
     "sqlite:///database.db",
     connect_args={"check_same_thread": False},
 )
+Base.metadata.create_all(engine)  # Create tables
 
 class User(Base):
 
@@ -37,9 +38,6 @@ class User(Base):
 
     def check_password(self, password):
         return self.password == password
-
-
-Base.metadata.create_all(engine)  # Create tables
 
 
 app = FastAPI()
@@ -167,3 +165,31 @@ async def get_person(iin: str, token: str = Depends(get_token_from_env)):
         return person_data
     else:
         raise HTTPException(status_code=response.status_code, detail="Error getting person data")
+    
+
+class SmsInput(BaseModel):
+    phone: str
+    smsText: str
+
+
+@app.post("/send_sms")
+async def send_sms(sms_data: SmsInput, token: str = Depends(get_token_from_env)):
+    url = "http://hak-sms123.gov4c.kz/api/smsgateway/send"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {token}",
+    }
+    data = {
+        "phone": sms_data.phone,
+        "smsText": sms_data.smsText,
+    }
+
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, headers=headers, json=data)
+
+    if response.status_code == 200:
+        return {"status": "success", "message": "SMS sent successfully"}
+    else:
+        raise HTTPException(status_code=response.status_code, detail="Error sending SMS")
+    
+
