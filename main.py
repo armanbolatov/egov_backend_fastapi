@@ -1,4 +1,6 @@
 import os
+import random
+from typing import List
 from fastapi import FastAPI, Depends, HTTPException, Header
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,7 +12,7 @@ import httpx
 from sqladmin import Admin, ModelView
 from sqlalchemy import Column, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import scoped_session, sessionmaker
+from sqlalchemy.orm import scoped_session, sessionmaker, aliased
 
 
 Base = declarative_base()
@@ -18,12 +20,11 @@ engine = create_engine(
     "sqlite:///database.db",
     connect_args={"check_same_thread": False},
 )
-
-
+security = HTTPBasic()
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # You can specify the allowed origins here, or use "*" to allow all origins
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,6 +52,21 @@ class User(Base):
         return self.password == password
     
 
+class Company(Base):
+    __tablename__ = "companies"
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String)
+
+
+class CourierCompanies(Base):
+    __tablename__ = "courier_companies"
+
+    id = Column(Integer, primary_key=True)
+    courier_id = Column(Integer)
+    company_id = Column(Integer)
+
+
 class Order(Base):
     __tablename__ = "orders"
 
@@ -73,6 +89,8 @@ class Order(Base):
     delivery_residential_complex_name = Column(String)
     delivery_additional_information = Column(String)
     courier_id = Column(Integer, nullable=True)
+    otp = Column(String, nullable=True) # One time password
+    status = Column(Integer, nullable=True) # 0 - not delivered, 1 - delivered
 
 
 class OrderData(BaseModel):
@@ -124,9 +142,18 @@ class OrderAdmin(ModelView, model=Order):
         Order.delivery_residential_complex_name,
         Order.delivery_additional_information,
         Order.courier_id,
+        Order.otp,
+        Order.status,
     ]
 admin.add_view(OrderAdmin)
-security = HTTPBasic()
+
+
+class CompanyAdmin(ModelView, model=Company):
+    column_list = [
+        Company.id,
+        Company.name,
+    ]
+admin.add_view(CompanyAdmin)
 
 
 class TokenResponse(BaseModel):
@@ -135,7 +162,7 @@ class TokenResponse(BaseModel):
     refresh_expires_in: int
     refresh_token: str
     token_type: str
-    not_before_policy: Optional[int]  # Make this field optional
+    not_before_policy: Optional[int]
     session_state: str
     scope: str
 
@@ -162,19 +189,21 @@ async def get_token():
         raise HTTPException(status_code=response.status_code, detail="Error getting token")
 
 
+Session = scoped_session(sessionmaker(bind=engine)) # Create a scoped session
+
+
 class UserIn(BaseModel):
     iin: str
     password: str
 
 
 class UserOut(BaseModel):
+    id: int
     first_name: str
     last_name: str
     role: int
     token: str
 
-
-Session = scoped_session(sessionmaker(bind=engine)) # Create a scoped session
 
 def get_users_from_db():
     session = Session()
@@ -199,6 +228,7 @@ def login(credentials: UserIn):
     if user is not None:
         token = hashlib.md5(f"{user.iin}:{user.password}".encode()).hexdigest()
         return UserOut(
+            id=user.id,
             first_name=user.first_name,
             last_name=user.last_name,
             role=user.role,
@@ -293,6 +323,9 @@ def save_order(order_data: OrderData):
             delivery_building_number=order_data.recipientInfo["deliveryAddress"]["buildingNumber"],
             delivery_residential_complex_name=order_data.recipientInfo["deliveryAddress"]["residentialComplexName"],
             delivery_additional_information=order_data.recipientInfo["deliveryAddress"]["additionalInformation"],
+            courier_id="n/a",
+            status=0,
+            otp="empty",
         )
         session.add(order)
         session.commit()
@@ -305,18 +338,23 @@ def save_order(order_data: OrderData):
 
 
 class AssignCourierInput(BaseModel):
-    order_id: int
+    order_number: str
     courier_id: int
 
 
-def assign_courier_to_order(order_id: int, courier_id: int):
+def assign_courier_to_order(order_number: str, courier_id: int):
     session = Session()
     try:
-        order = session.query(Order).filter(Order.id == order_id).first()
+        order = session.query(Order).filter(Order.order_number == order_number).first()
         if order is not None:
             order.courier_id = courier_id
             session.commit()
-            return {"message": "Courier assigned successfully", "order_id": order_id, "courier_id": courier_id}
+            return {
+                "message": "Courier assigned successfully",
+                "order_id": order_number,
+                "courier_id": courier_id,
+                "otp": order.otp,
+            }
         else:
             raise HTTPException(status_code=404, detail="Order not found")
     except Exception as e:
@@ -326,6 +364,130 @@ def assign_courier_to_order(order_id: int, courier_id: int):
         session.close()
 
 
+def generate_otp(length: int = 6) -> str:
+    return "".join(random.choices("0123456789", k=length))
+
+
 @app.post("/assign_courier")
 def assign_courier(assign_courier_data: AssignCourierInput):
-    return assign_courier_to_order(assign_courier_data.order_id, assign_courier_data.courier_id)
+    session = Session()
+    try:
+        order = session.query(Order).filter(Order.order_number == assign_courier_data.order_number).first()
+        if order is not None:
+            order.otp = generate_otp()
+            session.commit()
+        else:
+            raise HTTPException(status_code=404, detail="Order not found")
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    return assign_courier_to_order(assign_courier_data.order_number, assign_courier_data.courier_id)
+
+
+class OrderOut(BaseModel):
+    id: int
+    order_number: str
+    service_name: str
+    department: str
+    recipient_iin: str
+    recipient_first_name: str
+    recipient_last_name: str
+    recipient_phone_number: str
+    delivery_region: str
+    delivery_city: str
+    delivery_street: str
+    delivery_house_number: str
+    delivery_apartment_number: str
+    delivery_entrance_number: str
+    delivery_floor_number: str
+    delivery_building_number: str
+    delivery_residential_complex_name: str
+    delivery_additional_information: str
+    courier_id: str
+    otp: str
+
+
+def get_orders_for_courier(courier_id: int):
+    session = Session()
+    try:
+        orders = session.query(Order).filter(Order.courier_id == courier_id).filter(Order.status == 0).all()
+        return orders
+    finally:
+        session.close()
+
+
+@app.get("/courier/{courier_id}/orders", response_model=List[OrderOut])
+def get_courier_orders(courier_id: int):
+    orders = get_orders_for_courier(courier_id)
+    return [OrderOut(**order.__dict__) for order in orders]
+
+
+def get_unassigned_orders():
+    session = Session()
+    try:
+        orders = session.query(Order).filter(Order.courier_id == None).all()
+        return orders
+    finally:
+        session.close()
+
+
+@app.get("/unassigned_orders", response_model=List[OrderOut])
+def get_available_orders():
+    orders = get_unassigned_orders()
+    return [OrderOut(**order.__dict__) for order in orders]
+
+
+@app.get("/orders", response_model=List[OrderOut])
+def get_all_orders():
+    session = Session()
+    try:
+        orders = session.query(Order).all()
+        return [OrderOut(**order.__dict__) for order in orders]
+    finally:
+        session.close()
+
+
+class CompanyName(BaseModel):
+    courier_id: int
+    company_name: str
+
+
+def get_company_name_for_courier():
+    session = Session()
+    try:
+        company_alias = aliased(Company)
+        result = (
+            session.query(CourierCompanies.courier_id, company_alias.name)
+            .join(company_alias, CourierCompanies.company_id == company_alias.id)
+            .all()
+        )
+        return result
+    finally:
+        session.close()
+
+
+@app.get("/courier_companies", response_model=List[CompanyName])
+def get_courier_companies():
+    company_names = get_company_name_for_courier()
+    return [CompanyName(courier_id=courier_id, company_name=company_name) for courier_id, company_name in company_names]
+
+
+@app.post("/check_otp")
+def check_otp(order_number: str, otp: str):
+    session = Session()
+    try:
+        order = session.query(Order).filter(Order.order_number == order_number).first()
+        if order is not None:
+            if order.otp == otp:
+                order.status = 1
+                session.commit()
+                return {"message": "OTP is correct"}
+            else:
+                return {"message": "OTP is incorrect"}
+        else:
+            raise HTTPException(status_code=404, detail="Order not found")
+    except Exception as e:
+        session.rollback()
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        session.close()
