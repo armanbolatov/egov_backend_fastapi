@@ -425,7 +425,7 @@ def get_courier_orders(courier_id: int):
 def get_unassigned_orders():
     session = Session()
     try:
-        orders = session.query(Order).filter(Order.courier_id == None).all()
+        orders = session.query(Order).filter(Order.courier_id == 'n/a').all()
         return orders
     finally:
         session.close()
@@ -491,3 +491,46 @@ def check_otp(order_number: str, otp: str):
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         session.close()
+
+import osmnx as ox
+import networkx as nx
+import heapq
+
+#find the efficient path between two points, and calculate the cost between it;
+def dijkstra(graph, start, end):
+    queue = [(0, start)]
+    distances = {node: float('inf') for node in graph.nodes}
+    distances[start] = 0
+
+    while queue:
+        distance, current = heapq.heappop(queue)
+
+        if current == end:
+            return distance
+
+        for neighbor in graph.neighbors(current):
+            weight = graph.edges[current, neighbor]["length"]
+            new_distance = distance + weight
+
+            if new_distance < distances[neighbor]:
+                distances[neighbor] = new_distance
+                heapq.heappush(queue, (new_distance, neighbor))
+
+    return float('inf')
+
+def test(): 
+    # Define the start and end points as latitude and longitude coordinates
+    start_point = (51.196, 71.32687)  # NU
+    end_point = (51.1325, 71.4039)    # Khan shatyr
+
+    # Download the map data and create a graph
+    G = ox.graph_from_bbox(37.82, 37.74, -122.23, -122.48, network_type='drive', simplify=True)
+
+    # Find the nearest nodes in the graph for the given start and end points
+    start_node = ox.distance.nearest_nodes(G, [start_point[::-1]], return_dist=False)[0]
+    end_node = ox.distance.nearest_nodes(G, [end_point[::-1]], return_dist=False)[0]
+
+    # Calculate the shortest path using Dijkstra's algorithm
+    shortest_distance = dijkstra(G, start_node, end_node)
+    print(f"The shortest distance between two points ({start_point}, {end_point}) is: {shortest_distance} meters")
+    print(f"The cost of the trip is: {shortest_distance * 0.2} tenge")

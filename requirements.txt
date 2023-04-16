@@ -1,3 +1,11 @@
 uvicorn
-fastapi
+fastapi[all]
 httpx
+sqlalchemy
+sqladmin
+httpx
+hashlib
+pydantic
+osmnx
+networkx
+heapq
